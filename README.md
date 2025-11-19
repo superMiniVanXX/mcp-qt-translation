@@ -37,6 +37,22 @@ pip install -e .
   }
 }
 ```
+考虑到你可能在使用虚拟环境，你需要先完成venv配置并install这个模块，配置文件可能更像
+
+```json
+{
+  "mcpServers": {
+    "qt-translation": {
+      "command": "/path/to/venv/bin/python3",
+      "args": [
+        "-m",
+        "qt_translation_mcp"
+      ],
+      "disabled": false
+    }
+  }
+}
+```json
 
 ### 3. 使用
 
