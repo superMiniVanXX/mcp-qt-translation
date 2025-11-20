@@ -1,13 +1,20 @@
 """Qt TS file updater"""
 
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable, Tuple
 from lxml import etree
 import re
+from .logger import get_logger
+
+logger = get_logger('ts_updater')
 
 
 class TSUpdater:
     """Qt TS 翻译文件更新器"""
+    
+    def __init__(self):
+        """初始化 TS 更新器"""
+        self.last_failed_matches = []  # 记录最近一次操作的失败匹配
     
     def insert_translations(self, ts_files: List[str], translations: List[Dict]) -> Dict[str, int]:
         """将翻译条目插入到 TS 文件中
@@ -19,11 +26,14 @@ class TSUpdater:
         Returns:
             每个文件插入/更新的条目数量
         """
+        logger.info(f"开始插入翻译，文件数: {len(ts_files)}, 翻译条目数: {len(translations)}")
         results = {}
         
         for ts_file in ts_files:
+            logger.info(f"处理文件: {ts_file}")
             count = self._insert_to_file(ts_file, translations)
             results[ts_file] = count
+            logger.info(f"文件 {ts_file} 完成，插入/更新 {count} 条")
         
         return results
     
@@ -174,6 +184,99 @@ class TSUpdater:
         
         return index
     
+    def _insert_messages_to_content(self, content: str, translations: List[Dict]) -> Tuple[str, int, List[Dict]]:
+        """将新的 message 条目插入到文件内容中（仅当 context 存在时）
+        
+        Args:
+            content: 原始文件内容
+            translations: 要插入的翻译条目列表
+        
+        Returns:
+            (修改后的内容, 插入的条目数量, 失败的条目列表)
+        """
+        inserted_count = 0
+        failed_items = []
+        
+        # 按 context 分组
+        by_context = {}
+        for trans in translations:
+            context_name = trans.get('context', '')
+            if context_name not in by_context:
+                by_context[context_name] = []
+            by_context[context_name].append(trans)
+        
+        # 对每个 context 进行处理
+        for context_name, trans_list in by_context.items():
+            # 查找 context 块
+            escaped_context = re.escape(context_name)
+            context_pattern = (
+                r'(<context>\s*<name>' + escaped_context + r'</name>.*?)'
+                r'(</context>)'
+            )
+            
+            match = re.search(context_pattern, content, re.DOTALL)
+            
+            if match:
+                # Context 存在，在其末尾插入新的 message
+                prefix = match.group(1)
+                suffix = match.group(2)
+                
+                # 构建要插入的 message 元素
+                messages_xml = []
+                for trans in trans_list:
+                    source_text = trans.get('source', '')
+                    translation_text = trans.get('translation', '')
+                    comment_text = trans.get('comment', '')
+                    
+                    msg_xml = '    <message>\n'
+                    msg_xml += f'        <source>{self._escape_xml(source_text)}</source>\n'
+                    if comment_text:
+                        msg_xml += f'        <comment>{self._escape_xml(comment_text)}</comment>\n'
+                    msg_xml += f'        <translation>{self._escape_xml(translation_text)}</translation>\n'
+                    msg_xml += '    </message>\n'
+                    
+                    messages_xml.append(msg_xml)
+                    inserted_count += 1
+                    logger.debug(f"  插入到 context '{context_name}': {source_text[:30]}...")
+                
+                # 替换 context 块
+                new_context = prefix + ''.join(messages_xml) + suffix
+                content = content[:match.start()] + new_context + content[match.end():]
+            else:
+                # Context 不存在，记录为失败
+                logger.warning(f"  Context '{context_name}' 不存在，无法插入")
+                for trans in trans_list:
+                    failed_items.append({
+                        'context': context_name,
+                        'source': trans.get('source', ''),
+                        'translation': trans.get('translation', ''),
+                        'reason': f"Context '{context_name}' 不存在于 TS 文件中"
+                    })
+        
+        return content, inserted_count, failed_items
+    
+    def _escape_xml(self, text: str) -> str:
+        """转义 XML 特殊字符
+        
+        Args:
+            text: 原始文本
+        
+        Returns:
+            转义后的文本
+        """
+        if not text:
+            return text
+        
+        text = text.replace('&', '&amp;')
+        text = text.replace('<', '&lt;')
+        text = text.replace('>', '&gt;')
+        text = text.replace('"', '&quot;')
+        text = text.replace("'", '&apos;')
+        
+        return text
+    
+
+    
     def _update_file_by_text_replacement(self, ts_path: Path, translations: List[Dict]) -> int:
         """通过文本替换方式更新文件，只修改翻译相关的内容
         
@@ -184,29 +287,43 @@ class TSUpdater:
         Returns:
             修改的条目数量
         """
+        logger.debug(f"使用文本替换方式更新文件: {ts_path}")
+        
         # 读取原始文件内容
         with open(ts_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
+        logger.debug(f"文件大小: {len(content)} 字符")
         original_content = content
         modified_count = 0
+        skipped_count = 0
+        inserted_count = 0
+        to_insert = []  # 需要插入的条目
         
-        for trans in translations:
+        for idx, trans in enumerate(translations, 1):
             context_name = trans.get('context', '')
             source_text = trans.get('source', '')
             translation_text = trans.get('translation', '')
+            comment_text = trans.get('comment', '')
             
             if not context_name or not source_text or not translation_text:
+                skipped_count += 1
+                logger.debug(f"条目 {idx} 跳过: context={bool(context_name)}, source={bool(source_text)}, translation={bool(translation_text)}")
                 continue
             
+            logger.debug(f"条目 {idx}: [{context_name}] {source_text[:30]}... -> {translation_text[:30]}...")
+            
             # 转义特殊字符用于正则表达式
-            escaped_context = re.escape(context_name)
             escaped_source = re.escape(source_text)
+            escaped_context = re.escape(context_name)
+            
+            # 只使用完全匹配策略
+            # context 名称必须与 TS 文件中的 <name> 完全一致
+            context_pattern = escaped_context.replace(r'\ ', r'\s*') + r'(?=</name>)'
             
             # 查找对应的 message 块，匹配 context 和 source
-            # 这个正则表达式会匹配包含指定 context 和 source 的 message 块
             pattern = (
-                r'(<context>\s*<name>' + escaped_context + r'</name>.*?'
+                r'(<context>\s*<name>' + context_pattern + r'</name>.*?'
                 r'<message[^>]*>.*?'
                 r'<source>' + escaped_source + r'</source>\s*'
                 r'<translation[^>]*>)(.*?)(</translation>)'
@@ -223,17 +340,46 @@ class TSUpdater:
                     modified_count += 1
                     # 移除 type="unfinished" 属性
                     prefix = re.sub(r'\s+type="unfinished"', '', prefix)
+                    logger.debug(f"  替换翻译: '{current_trans.strip()[:30]}...' -> '{translation_text[:30]}...'")
                     return prefix + translation_text + suffix
+                else:
+                    logger.debug(f"  翻译内容相同，跳过")
                 return match.group(0)
             
             # 使用 DOTALL 标志让 . 匹配换行符
+            before_count = modified_count
             content = re.sub(pattern, replace_translation, content, flags=re.DOTALL)
+            
+            # 如果匹配失败，说明需要插入新条目
+            if modified_count == before_count:
+                logger.info(f"  未找到匹配的 message，将作为新条目插入")
+                to_insert.append(trans)
+        
+        # 处理需要插入的条目
+        failed_items = []
+        if to_insert:
+            logger.info(f"开始插入 {len(to_insert)} 个新条目")
+            content, inserted, failed_items = self._insert_messages_to_content(content, to_insert)
+            inserted_count = inserted
+        
+        logger.info(f"文本替换完成: 更新 {modified_count} 条，插入 {inserted_count} 条，跳过 {skipped_count} 条，失败 {len(failed_items)} 条")
+        
+        # 保存失败记录
+        self.last_failed_matches = failed_items
+        
+        # 如果有失败的条目，记录警告
+        if failed_items:
+            for item in failed_items:
+                logger.warning(f"  失败: [{item['context']}] {item['source'][:50]}... - {item['reason']}")
         
         # 只有在内容确实改变时才写入文件
-        if content != original_content and modified_count > 0:
+        if content != original_content:
+            logger.info(f"写入文件: {ts_path}")
             self._safe_write_text(content, ts_path)
+        else:
+            logger.info(f"文件无变化，不写入")
         
-        return modified_count
+        return modified_count + inserted_count
     
     def _safe_write_text(self, content: str, target_path: Path):
         """安全写入文本内容，使用临时文件保护原文件

@@ -2,6 +2,9 @@
 
 import re
 from typing import List, Dict
+from .logger import get_logger
+
+logger = get_logger('translation_table')
 
 
 class TranslationTable:
@@ -128,6 +131,9 @@ class TranslationTable:
         Returns:
             字典，键为语言代码(zh_CN, zh_HK, zh_TW)，值为翻译条目列表
         """
+        logger.info("开始解析多语言表格")
+        logger.debug(f"表格内容长度: {len(markdown_table)} 字符")
+        
         result = {
             'zh_CN': [],
             'zh_HK': [],
@@ -135,15 +141,27 @@ class TranslationTable:
         }
         
         lines = markdown_table.strip().split('\n')
+        logger.debug(f"表格总行数: {len(lines)}")
         
         # 跳过表头和分隔线
         data_lines = [line for line in lines if line.strip().startswith('|')]
+        logger.debug(f"有效数据行数: {len(data_lines)}")
+        
         if len(data_lines) <= 2:
+            logger.warning("表格数据行不足，至少需要表头、分隔线和数据行")
             return result
         
+        # 记录表头信息
+        if data_lines:
+            logger.debug(f"表头: {data_lines[0]}")
+        
         # 解析数据行（跳过表头和分隔线）
+        row_num = 0
         for line in data_lines[2:]:
+            row_num += 1
             parts = [p.strip() for p in line.split('|')]
+            logger.debug(f"第 {row_num} 行，分割后列数: {len(parts)}")
+            
             # 格式: | 序号 | Context | 英文原文 | 简体中文 | 香港繁体 | 台湾繁体 | 备注 |
             if len(parts) >= 8:
                 context = parts[2]
@@ -153,6 +171,11 @@ class TranslationTable:
                 zh_tw = parts[6]
                 comment = parts[7] if len(parts) > 7 else ""
                 
+                logger.debug(f"第 {row_num} 行解析: context={context}, source={source}")
+                logger.debug(f"  zh_CN='{zh_cn}' (长度:{len(zh_cn)})")
+                logger.debug(f"  zh_HK='{zh_hk}' (长度:{len(zh_hk)})")
+                logger.debug(f"  zh_TW='{zh_tw}' (长度:{len(zh_tw)})")
+                
                 # 为每种语言添加翻译条目
                 if zh_cn:
                     result['zh_CN'].append({
@@ -161,6 +184,9 @@ class TranslationTable:
                         'translation': TranslationTable._unescape_markdown(zh_cn),
                         'comment': TranslationTable._unescape_markdown(comment)
                     })
+                    logger.debug(f"  添加 zh_CN 翻译")
+                else:
+                    logger.debug(f"  zh_CN 为空，跳过")
                 
                 if zh_hk:
                     result['zh_HK'].append({
@@ -169,6 +195,9 @@ class TranslationTable:
                         'translation': TranslationTable._unescape_markdown(zh_hk),
                         'comment': TranslationTable._unescape_markdown(comment)
                     })
+                    logger.debug(f"  添加 zh_HK 翻译")
+                else:
+                    logger.debug(f"  zh_HK 为空，跳过")
                 
                 if zh_tw:
                     result['zh_TW'].append({
@@ -177,7 +206,13 @@ class TranslationTable:
                         'translation': TranslationTable._unescape_markdown(zh_tw),
                         'comment': TranslationTable._unescape_markdown(comment)
                     })
+                    logger.debug(f"  添加 zh_TW 翻译")
+                else:
+                    logger.debug(f"  zh_TW 为空，跳过")
+            else:
+                logger.warning(f"第 {row_num} 行列数不足: {len(parts)} < 8")
         
+        logger.info(f"解析完成: zh_CN={len(result['zh_CN'])}, zh_HK={len(result['zh_HK'])}, zh_TW={len(result['zh_TW'])}")
         return result
     
     @staticmethod

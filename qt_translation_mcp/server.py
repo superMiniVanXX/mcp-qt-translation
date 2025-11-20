@@ -1,17 +1,21 @@
 """MCP Server implementation for Qt translation management"""
 
-import logging
+import os
+from typing import List, Optional
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, SamplingMessage, TextContent as SamplingTextContent
 from mcp.server.stdio import stdio_server
 
 from .git_collector import GitCollector
 from .ts_parser import TSParser
 from .ts_updater import TSUpdater
 from .translation_table import TranslationTable
+from .logger import setup_logger, get_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# 从环境变量读取日志目录，默认为 ~/.qt_translation_mcp/logs
+log_dir = os.environ.get('QT_TRANSLATION_LOG_DIR', os.path.expanduser('~/.qt_translation_mcp/logs'))
+setup_logger(log_dir=log_dir)
+logger = get_logger('server')
 
 app = Server("qt-translation-mcp")
 
@@ -142,7 +146,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="import_translations",
-            description="导入 LLM 翻译后的表格数据，填充到 TS 文件中。支持单语言或多语言表格自动识别。",
+            description="导入 LLM 翻译后的表格数据，填充到 TS 文件中。支持单语言或多语言表格自动识别。注意：context 名称必须与 TS 文件中的 <name> 完全一致。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -168,6 +172,8 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls"""
+    logger.info(f"Tool called: {name}")
+    logger.debug(f"Arguments: {arguments}")
     try:
         if name == "collect_translations_from_git":
             collector = GitCollector(arguments["repo_path"])
@@ -245,36 +251,96 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             ts_base_path = arguments["ts_base_path"]
             multi_language = arguments.get("multi_language", True)
             
+            logger.info(f"开始导入翻译，base_path={ts_base_path}, multi_language={multi_language}")
+            logger.debug(f"翻译数据长度: {len(translation_data)} 字符")
+            
             updater = TSUpdater()
             
             if multi_language:
                 # 解析多语言表格
+                logger.info("解析多语言表格...")
                 lang_translations = TranslationTable.parse_multi_language_table(translation_data)
+                
+                # 记录解析结果
+                for lang_code, translations in lang_translations.items():
+                    logger.info(f"语言 {lang_code}: 解析到 {len(translations)} 条翻译")
+                    if translations:
+                        logger.debug(f"{lang_code} 前3条: {translations[:3]}")
                 
                 # 为每种语言生成 TS 文件路径并更新
                 results = {}
+                all_failed_matches = []
+                
                 for lang_code, translations in lang_translations.items():
                     if translations:  # 只处理有翻译内容的语言
                         ts_file = f"{ts_base_path}_{lang_code}.ts"
+                        logger.info(f"更新文件 {ts_file}，共 {len(translations)} 条翻译")
                         result = updater.insert_translations([ts_file], translations)
                         results.update(result)
+                        logger.info(f"文件 {ts_file} 更新完成，实际导入 {result.get(ts_file, 0)} 条")
+                        
+                        # 收集失败的匹配
+                        if updater.last_failed_matches:
+                            for failed in updater.last_failed_matches:
+                                all_failed_matches.append({
+                                    'file': ts_file,
+                                    'lang': lang_code,
+                                    **failed
+                                })
                 
-                return [TextContent(
-                    type="text",
-                    text=f"多语言翻译导入完成：\n\n" + 
-                         "\n".join([f"- {file}: {count} 个条目" for file, count in results.items()])
-                )]
+                logger.info(f"多语言翻译导入完成，总计: {results}")
+                
+                # 构建返回消息
+                response_text = "多语言翻译导入完成：\n\n"
+                response_text += "\n".join([f"- {file}: {count} 个条目" for file, count in results.items()])
+                
+                # 如果有失败的匹配，添加详细信息
+                if all_failed_matches:
+                    response_text += f"\n\n⚠️ 有 {len(all_failed_matches)} 个条目未能匹配：\n\n"
+                    for i, failed in enumerate(all_failed_matches[:10], 1):  # 最多显示10个
+                        response_text += f"{i}. [{failed['lang']}] Context: `{failed['context']}`\n"
+                        response_text += f"   Source: `{failed['source'][:60]}...`\n"
+                        response_text += f"   原因: {failed['reason']}\n\n"
+                    
+                    if len(all_failed_matches) > 10:
+                        response_text += f"... 还有 {len(all_failed_matches) - 10} 个失败条目\n\n"
+                    
+                    response_text += "请检查并修正翻译表格中的 context 名称，确保与 TS 文件中的 <name> 标签完全一致。\n"
+                    response_text += "你可以使用 parse_ts_file 工具查看 TS 文件中的实际 context 名称。"
+                
+                return [TextContent(type="text", text=response_text)]
             else:
                 # 单语言表格
+                logger.info("解析单语言表格...")
                 translations = TranslationTable.parse_markdown_table(translation_data)
-                ts_file = f"{ts_base_path}_zh_CN.ts"  # 默认简体中文
-                results = updater.insert_translations([ts_file], translations)
+                logger.info(f"解析到 {len(translations)} 条翻译")
+                if translations:
+                    logger.debug(f"前3条: {translations[:3]}")
                 
-                return [TextContent(
-                    type="text",
-                    text=f"翻译导入完成：\n\n" + 
-                         "\n".join([f"- {file}: {count} 个条目" for file, count in results.items()])
-                )]
+                ts_file = f"{ts_base_path}_zh_CN.ts"  # 默认简体中文
+                logger.info(f"更新文件 {ts_file}")
+                results = updater.insert_translations([ts_file], translations)
+                logger.info(f"单语言翻译导入完成: {results}")
+                
+                # 构建返回消息
+                response_text = "翻译导入完成：\n\n"
+                response_text += "\n".join([f"- {file}: {count} 个条目" for file, count in results.items()])
+                
+                # 如果有失败的匹配，添加详细信息
+                if updater.last_failed_matches:
+                    response_text += f"\n\n⚠️ 有 {len(updater.last_failed_matches)} 个条目未能匹配：\n\n"
+                    for i, failed in enumerate(updater.last_failed_matches[:10], 1):
+                        response_text += f"{i}. Context: `{failed['context']}`\n"
+                        response_text += f"   Source: `{failed['source'][:60]}...`\n"
+                        response_text += f"   原因: {failed['reason']}\n\n"
+                    
+                    if len(updater.last_failed_matches) > 10:
+                        response_text += f"... 还有 {len(updater.last_failed_matches) - 10} 个失败条目\n\n"
+                    
+                    response_text += "请检查并修正翻译表格中的 context 名称，确保与 TS 文件中的 <name> 标签完全一致。\n"
+                    response_text += "你可以使用 parse_ts_file 工具查看 TS 文件中的实际 context 名称。"
+                
+                return [TextContent(type="text", text=response_text)]
         
         else:
             return [TextContent(type="text", text=f"未知工具: {name}")]

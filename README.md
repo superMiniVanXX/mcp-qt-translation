@@ -79,6 +79,7 @@ Git 提交 → 提取文案 → 导出表格 → LLM 翻译 → 导入 TS 文件
 - [详细使用指南](USAGE.md)
 - [翻译工作流程](examples/translation_workflow.md)
 - [示例用法](examples/example_usage.md)
+- [日志系统使用指南](LOGGING.md) ⭐ 新增
 
 ## 支持的语言
 
