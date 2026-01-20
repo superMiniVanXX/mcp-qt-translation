@@ -107,7 +107,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="export_for_translation",
-            description="导出待翻译内容为表格格式，供 LLM 进行翻译。支持单语言或多语言（简体、香港繁体、台湾繁体）表格。",
+            description="导出待翻译内容为表格格式，供 LLM 进行翻译。支持单语言或多语言（简体、香港繁体、台湾繁体、维吾尔语、藏语）表格。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -137,7 +137,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "multi_language": {
                         "type": "boolean",
-                        "description": "是否导出多语言表格（简体中文、香港繁体、台湾繁体）",
+                        "description": "是否导出多语言表格（简体中文、香港繁体、台湾繁体、维吾尔语、藏语）",
                         "default": True
                     }
                 },
@@ -152,7 +152,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "ts_base_path": {
                         "type": "string",
-                        "description": "TS 文件基础路径（不含语言后缀），例如 '/path/to/app'，将自动处理 app_zh_CN.ts, app_zh_HK.ts, app_zh_TW.ts"
+                        "description": "TS 文件基础路径（不含语言后缀），例如 '/path/to/app'，将自动处理 app_zh_CN.ts, app_zh_HK.ts, app_zh_TW.ts, app_ug.ts, app_bo.ts"
                     },
                     "translation_data": {
                         "type": "string",
@@ -235,7 +235,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             
             if multi_language:
                 table = TranslationTable.create_multi_language_table(entries)
-                hint = "请翻译表格中的三种中文（简体、香港繁体、台湾繁体）"
+                hint = "请翻译表格中的五种语言（简体中文、香港繁体、台湾繁体、维吾尔语、藏语）"
             else:
                 table = TranslationTable.create_table(entries, "中文")
                 hint = "请翻译表格中的内容"

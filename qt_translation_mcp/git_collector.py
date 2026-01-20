@@ -4,6 +4,9 @@ import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import git
+from .logger import get_logger
+
+logger = get_logger('git_collector')
 
 
 class GitCollector:
@@ -11,9 +14,24 @@ class GitCollector:
     
     # Qt 翻译函数的正则模式
     TR_PATTERNS = [
-        r'tr\s*\(\s*["\']([^"\']+)["\']\s*\)',  # tr("text")
-        r'QObject::tr\s*\(\s*["\']([^"\']+)["\']\s*\)',  # QObject::tr("text")
-        r'QCoreApplication::translate\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*\)',  # translate("context", "text")
+        # tr("text") - 基本形式
+        r'tr\s*\(\s*["\']([^"\']+)["\']\s*\)',
+        # tr("text", "comment") - 带注释
+        r'tr\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']*)["\']\s*\)',
+        # tr("text", "comment", n) - 带注释和复数形式
+        r'tr\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']*)["\']\s*,\s*[^)]+\)',
+        # QObject::tr("text") - 基本形式
+        r'QObject::tr\s*\(\s*["\']([^"\']+)["\']\s*\)',
+        # QObject::tr("text", "comment") - 带注释
+        r'QObject::tr\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']*)["\']\s*\)',
+        # QObject::tr("text", "comment", n) - 带注释和复数形式
+        r'QObject::tr\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']*)["\']\s*,\s*[^)]+\)',
+        # QCoreApplication::translate("context", "text")
+        r'QCoreApplication::translate\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*\)',
+        # QCoreApplication::translate("context", "text", "comment")
+        r'QCoreApplication::translate\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']*)["\']\s*\)',
+        # QCoreApplication::translate("context", "text", "comment", n)
+        r'QCoreApplication::translate\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']*)["\']\s*,\s*[^)]+\)',
     ]
     
     def __init__(self, repo_path: str):
@@ -36,14 +54,23 @@ class GitCollector:
         Returns:
             翻译条目列表
         """
+        logger.info(f"开始收集翻译文案 - 提交范围: {commit_range}, 文件模式: {file_patterns}")
+        
         translations = []
         seen = set()
+        processed_commits = 0
+        processed_files = 0
+        processed_lines = 0
         
         # 解析提交范围，限制最大提交数防止卡死
         MAX_COMMITS = 200
         commits = list(self.repo.iter_commits(commit_range, max_count=MAX_COMMITS))
+        logger.info(f"找到 {len(commits)} 个提交需要处理")
         
         for commit in commits:
+            processed_commits += 1
+            logger.debug(f"处理提交 {processed_commits}/{len(commits)}: {commit.hexsha[:8]} - {commit.summary}")
+            
             # 获取提交的差异
             if commit.parents:
                 diffs = commit.parents[0].diff(commit, create_patch=True)
@@ -56,10 +83,14 @@ class GitCollector:
                 if not self._matches_patterns(diff.b_path, file_patterns):
                     continue
                 
+                processed_files += 1
+                logger.debug(f"处理文件: {diff.b_path}")
+                
                 # 只处理新增的行
                 if diff.diff:
                     patch = diff.diff.decode('utf-8', errors='ignore')
                     added_lines = [line[1:] for line in patch.split('\n') if line.startswith('+') and not line.startswith('+++')]
+                    processed_lines += len(added_lines)
                     
                     for line in added_lines:
                         # 提取翻译文案
@@ -69,6 +100,11 @@ class GitCollector:
                             if key not in seen:
                                 seen.add(key)
                                 translations.append(entry)
+                            else:
+                                logger.debug(f"跳过重复条目: [{entry['context']}] {entry['source']}")
+        
+        logger.info(f"收集完成 - 处理了 {processed_commits} 个提交, {processed_files} 个文件, {processed_lines} 行代码")
+        logger.info(f"共收集到 {len(translations)} 个唯一的翻译条目")
         
         return translations
     
@@ -86,25 +122,55 @@ class GitCollector:
         """从代码行中提取翻译文案"""
         results = []
         
+        logger.debug(f"正在分析代码行: {line.strip()}")
+        
         # 尝试匹配各种 tr 函数模式
-        for pattern in self.TR_PATTERNS:
+        for pattern_idx, pattern in enumerate(self.TR_PATTERNS):
             matches = re.finditer(pattern, line)
             for match in matches:
-                if 'translate' in pattern and len(match.groups()) >= 2:
-                    # QCoreApplication::translate("context", "text")
-                    context = match.group(1)
-                    source = match.group(2)
-                else:
-                    # tr("text") - 需要从文件中提取完整的 context
-                    context = self._extract_context_from_file(filepath)
-                    source = match.group(1)
+                logger.debug(f"模式 {pattern_idx + 1} 匹配成功: {pattern}")
+                logger.debug(f"匹配组: {match.groups()}")
                 
-                results.append({
-                    'context': context,
-                    'source': source,
-                    'file': filepath,
-                    'line': line.strip()
-                })
+                context = None
+                source = None
+                comment = ""
+                
+                if 'QCoreApplication::translate' in pattern:
+                    # QCoreApplication::translate 系列
+                    if len(match.groups()) >= 2:
+                        context = match.group(1)
+                        source = match.group(2)
+                        # 如果有第三个组，那是注释
+                        if len(match.groups()) >= 3 and match.group(3):
+                            comment = match.group(3)
+                        logger.debug(f"QCoreApplication::translate - Context: '{context}', Source: '{source}', Comment: '{comment}'")
+                elif 'QObject::tr' in pattern or pattern.startswith(r'tr\s*\('):
+                    # tr() 或 QObject::tr() 系列
+                    source = match.group(1)
+                    # 如果有第二个组，那是注释
+                    if len(match.groups()) >= 2 and match.group(2):
+                        comment = match.group(2)
+                    # 需要从文件中提取 context
+                    context = self._extract_context_from_file(filepath)
+                    logger.debug(f"tr/QObject::tr - Source: '{source}', Comment: '{comment}', 提取的Context: '{context}'")
+                
+                if context and source:
+                    entry = {
+                        'context': context,
+                        'source': source,
+                        'comment': comment,
+                        'file': filepath,
+                        'line': line.strip()
+                    }
+                    results.append(entry)
+                    logger.info(f"成功提取翻译条目: [{context}] {source}")
+                    if comment:
+                        logger.debug(f"  注释: {comment}")
+                else:
+                    logger.warning(f"提取失败 - Context: '{context}', Source: '{source}'")
+        
+        if not results:
+            logger.debug(f"该行未匹配到翻译函数: {line.strip()}")
         
         return results
     

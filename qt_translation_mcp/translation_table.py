@@ -14,7 +14,9 @@ class TranslationTable:
     LANGUAGES = {
         'zh_CN': '简体中文',
         'zh_HK': '香港繁体',
-        'zh_TW': '台湾繁体'
+        'zh_TW': '台湾繁体',
+        'ug': '维吾尔语',
+        'bo': '藏语'
     }
     
     @staticmethod
@@ -52,7 +54,7 @@ class TranslationTable:
     
     @staticmethod
     def create_multi_language_table(entries: List[Dict]) -> str:
-        """创建多语言翻译表格（简体、香港繁体、台湾繁体）
+        """创建多语言翻译表格（简体、香港繁体、台湾繁体、维吾尔语、藏语）
         
         Args:
             entries: 翻译条目列表
@@ -64,8 +66,8 @@ class TranslationTable:
             return "没有待翻译的条目"
         
         # 表头
-        table = "| 序号 | Context | 英文原文 | 简体中文(zh_CN) | 香港繁体(zh_HK) | 台湾繁体(zh_TW) | 备注 |\n"
-        table += "|------|---------|----------|----------------|----------------|----------------|------|\n"
+        table = "| 序号 | Context | 英文原文 | 简体中文(zh_CN) | 香港繁体(zh_HK) | 台湾繁体(zh_TW) | 维吾尔语(ug) | 藏语(bo) | 备注 |\n"
+        table += "|------|---------|----------|----------------|----------------|----------------|------------|--------|------|\n"
         
         # 表格内容
         for idx, entry in enumerate(entries, 1):
@@ -78,7 +80,7 @@ class TranslationTable:
             source = TranslationTable._escape_markdown(source)
             comment = TranslationTable._escape_markdown(comment)
             
-            table += f"| {idx} | {context} | {source} | | | | {comment} |\n"
+            table += f"| {idx} | {context} | {source} | | | | | | {comment} |\n"
         
         return table
     
@@ -129,7 +131,7 @@ class TranslationTable:
             markdown_table: Markdown 格式的多语言表格字符串
         
         Returns:
-            字典，键为语言代码(zh_CN, zh_HK, zh_TW)，值为翻译条目列表
+            字典，键为语言代码(zh_CN, zh_HK, zh_TW, ug_CN, bo_CN)，值为翻译条目列表
         """
         logger.info("开始解析多语言表格")
         logger.debug(f"表格内容长度: {len(markdown_table)} 字符")
@@ -137,7 +139,9 @@ class TranslationTable:
         result = {
             'zh_CN': [],
             'zh_HK': [],
-            'zh_TW': []
+            'zh_TW': [],
+            'ug': [],
+            'bo': []
         }
         
         lines = markdown_table.strip().split('\n')
@@ -162,19 +166,23 @@ class TranslationTable:
             parts = [p.strip() for p in line.split('|')]
             logger.debug(f"第 {row_num} 行，分割后列数: {len(parts)}")
             
-            # 格式: | 序号 | Context | 英文原文 | 简体中文 | 香港繁体 | 台湾繁体 | 备注 |
-            if len(parts) >= 8:
+            # 格式: | 序号 | Context | 英文原文 | 简体中文 | 香港繁体 | 台湾繁体 | 维吾尔语 | 藏语 | 备注 |
+            if len(parts) >= 10:
                 context = parts[2]
                 source = parts[3]
                 zh_cn = parts[4]
                 zh_hk = parts[5]
                 zh_tw = parts[6]
-                comment = parts[7] if len(parts) > 7 else ""
+                ug = parts[7]
+                bo = parts[8]
+                comment = parts[9] if len(parts) > 9 else ""
                 
                 logger.debug(f"第 {row_num} 行解析: context={context}, source={source}")
                 logger.debug(f"  zh_CN='{zh_cn}' (长度:{len(zh_cn)})")
                 logger.debug(f"  zh_HK='{zh_hk}' (长度:{len(zh_hk)})")
                 logger.debug(f"  zh_TW='{zh_tw}' (长度:{len(zh_tw)})")
+                logger.debug(f"  ug='{ug}' (长度:{len(ug)})")
+                logger.debug(f"  bo='{bo}' (长度:{len(bo)})")
                 
                 # 为每种语言添加翻译条目
                 if zh_cn:
@@ -209,10 +217,32 @@ class TranslationTable:
                     logger.debug(f"  添加 zh_TW 翻译")
                 else:
                     logger.debug(f"  zh_TW 为空，跳过")
+                
+                if ug:
+                    result['ug'].append({
+                        'context': TranslationTable._unescape_markdown(context),
+                        'source': TranslationTable._unescape_markdown(source),
+                        'translation': TranslationTable._unescape_markdown(ug),
+                        'comment': TranslationTable._unescape_markdown(comment)
+                    })
+                    logger.debug(f"  添加 ug 翻译")
+                else:
+                    logger.debug(f"  ug 为空，跳过")
+                
+                if bo:
+                    result['bo'].append({
+                        'context': TranslationTable._unescape_markdown(context),
+                        'source': TranslationTable._unescape_markdown(source),
+                        'translation': TranslationTable._unescape_markdown(bo),
+                        'comment': TranslationTable._unescape_markdown(comment)
+                    })
+                    logger.debug(f"  添加 bo 翻译")
+                else:
+                    logger.debug(f"  bo 为空，跳过")
             else:
-                logger.warning(f"第 {row_num} 行列数不足: {len(parts)} < 8")
+                logger.warning(f"第 {row_num} 行列数不足: {len(parts)} < 10")
         
-        logger.info(f"解析完成: zh_CN={len(result['zh_CN'])}, zh_HK={len(result['zh_HK'])}, zh_TW={len(result['zh_TW'])}")
+        logger.info(f"解析完成: zh_CN={len(result['zh_CN'])}, zh_HK={len(result['zh_HK'])}, zh_TW={len(result['zh_TW'])}, ug={len(result['ug'])}, bo={len(result['bo'])}")
         return result
     
     @staticmethod

@@ -185,7 +185,7 @@ class TSUpdater:
         return index
     
     def _insert_messages_to_content(self, content: str, translations: List[Dict]) -> Tuple[str, int, List[Dict]]:
-        """将新的 message 条目插入到文件内容中（仅当 context 存在时）
+        """将新的 message 条目插入到文件内容中（仅当 context 存在且 message 不存在时）
         
         Args:
             content: 原始文件内容
@@ -217,17 +217,36 @@ class TSUpdater:
             match = re.search(context_pattern, content, re.DOTALL)
             
             if match:
-                # Context 存在，在其末尾插入新的 message
+                # Context 存在，检查每个 message 是否已存在
+                context_block = match.group(1)
                 prefix = match.group(1)
                 suffix = match.group(2)
                 
-                # 构建要插入的 message 元素
+                # 构建要插入的 message 元素（仅插入不存在的）
                 messages_xml = []
                 for trans in trans_list:
                     source_text = trans.get('source', '')
                     translation_text = trans.get('translation', '')
                     comment_text = trans.get('comment', '')
                     
+                    # 检查该 message 是否已存在于 context 中
+                    # 规范化空白字符以匹配不同格式
+                    normalized_source = re.sub(r'\s+', ' ', source_text).strip()
+                    escaped_source = re.escape(normalized_source)
+                    flexible_source = escaped_source.replace(r'\ ', r'\s+')
+                    message_pattern = r'<message[^>]*>.*?<source>\s*' + flexible_source + r'\s*</source>.*?</message>'
+                    
+                    if re.search(message_pattern, context_block, re.DOTALL):
+                        # Message 已存在，跳过
+                        logger.debug(f"  Message 已存在，跳过: [{context_name}] {source_text[:30]}...")
+                        failed_items.append({
+                            'context': context_name,
+                            'source': source_text,
+                            'reason': 'Message already exists in context'
+                        })
+                        continue
+                    
+                    # Message 不存在，构建插入内容
                     msg_xml = '    <message>\n'
                     msg_xml += f'        <source>{self._escape_xml(source_text)}</source>\n'
                     if comment_text:
@@ -239,19 +258,45 @@ class TSUpdater:
                     inserted_count += 1
                     logger.debug(f"  插入到 context '{context_name}': {source_text[:30]}...")
                 
-                # 替换 context 块
-                new_context = prefix + ''.join(messages_xml) + suffix
-                content = content[:match.start()] + new_context + content[match.end():]
+                # 如果有需要插入的 message，替换 context 块
+                if messages_xml:
+                    new_context = prefix + ''.join(messages_xml) + suffix
+                    content = content[:match.start()] + new_context + content[match.end():]
             else:
-                # Context 不存在，记录为失败
-                logger.warning(f"  Context '{context_name}' 不存在，无法插入")
+                # Context 不存在，创建新的 context
+                logger.info(f"  Context '{context_name}' 不存在，创建新 context")
+                
+                # 构建新的 context 块
+                context_xml = '<context>\n'
+                context_xml += f'    <name>{self._escape_xml(context_name)}</name>\n'
+                
                 for trans in trans_list:
-                    failed_items.append({
-                        'context': context_name,
-                        'source': trans.get('source', ''),
-                        'translation': trans.get('translation', ''),
-                        'reason': f"Context '{context_name}' 不存在于 TS 文件中"
-                    })
+                    source_text = trans.get('source', '')
+                    translation_text = trans.get('translation', '')
+                    comment_text = trans.get('comment', '')
+                    
+                    context_xml += '    <message>\n'
+                    context_xml += f'        <source>{self._escape_xml(source_text)}</source>\n'
+                    if comment_text:
+                        context_xml += f'        <comment>{self._escape_xml(comment_text)}</comment>\n'
+                    context_xml += f'        <translation>{self._escape_xml(translation_text)}</translation>\n'
+                    context_xml += '    </message>\n'
+                    
+                    inserted_count += 1
+                    logger.debug(f"  创建 context '{context_name}' 并插入: {source_text[:30]}...")
+                
+                context_xml += '</context>\n'
+                
+                # 在 </TS> 标签之前插入新的 context
+                ts_end_pattern = r'(</TS>)'
+                ts_match = re.search(ts_end_pattern, content)
+                
+                if ts_match:
+                    content = content[:ts_match.start()] + context_xml + content[ts_match.start():]
+                else:
+                    # 如果找不到 </TS>，追加到文件末尾
+                    logger.warning(f"  未找到 </TS> 标签，追加到文件末尾")
+                    content += context_xml
         
         return content, inserted_count, failed_items
     
@@ -314,7 +359,12 @@ class TSUpdater:
             logger.debug(f"条目 {idx}: [{context_name}] {source_text[:30]}... -> {translation_text[:30]}...")
             
             # 转义特殊字符用于正则表达式
-            escaped_source = re.escape(source_text)
+            # 规范化 source 文本：将连续空白字符替换为 \s+ 以匹配 TS 文件中的不同格式
+            normalized_source = re.sub(r'\s+', ' ', source_text).strip()
+            escaped_source = re.escape(normalized_source)
+            # 将转义后的空格替换为 \s+，以匹配任意空白字符（包括换行）
+            flexible_source = escaped_source.replace(r'\ ', r'\s+')
+            
             escaped_context = re.escape(context_name)
             
             # 只使用完全匹配策略
@@ -322,10 +372,11 @@ class TSUpdater:
             context_pattern = escaped_context.replace(r'\ ', r'\s*') + r'(?=</name>)'
             
             # 查找对应的 message 块，匹配 context 和 source
+            # 使用 flexible_source 以匹配 TS 文件中可能的换行
             pattern = (
                 r'(<context>\s*<name>' + context_pattern + r'</name>.*?'
                 r'<message[^>]*>.*?'
-                r'<source>' + escaped_source + r'</source>\s*'
+                r'<source>\s*' + flexible_source + r'\s*</source>\s*'
                 r'<translation[^>]*>)(.*?)(</translation>)'
             )
             
